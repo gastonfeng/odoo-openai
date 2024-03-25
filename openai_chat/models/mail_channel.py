@@ -6,7 +6,7 @@ from odoo import models, _
 
 
 class MailChannel(models.Model):
-    _inherit = 'mail.channel'
+    _inherit = 'discuss.channel'
 
     def execute_command_clear_ai_chat(self, **kwargs):
         partner = self.env.user.partner_id
