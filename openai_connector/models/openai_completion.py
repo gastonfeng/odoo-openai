@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-# Copyright (C) 2022 - Myrrkel (https://github.com/myrrkel).
+# Copyright (C) 2022 - Michel Perrocheau (https://github.com/myrrkel).
 # License AGPL-3.0 or later (https://www.gnu.org/licenses/agpl.html).
+import json
 
 from odoo import models, fields, api, _
 
@@ -15,16 +16,26 @@ class OpenAiCompletion(models.Model):
     _inherit = ['openai.mixin']
 
     def _get_openai_model_list(self):
-        openai = self.get_openai()
-        model_list = openai.Model.list()
+        try:
+            openai = self.get_openai()
+        except Exception as err:
+            return [('gpt-3.5-turbo', 'gpt-3.5-turbo')]
+        model_list = openai.models.list()
         res = [(m.id, m.id) for m in model_list.data]
         res.sort()
         return res
 
     def _get_post_process_list(self):
-        return [('list_to_many2many', 'List to Many2many')]
+        return [('list_to_many2many', _('List to Many2many')),
+                ('json_to_questions', _('JSON to questions'))]
 
-    ai_model = fields.Selection(selection='_get_openai_model_list', string='AI Model', required=True)
+    def _get_response_format_list(self):
+        return [('text', _('Text')),
+                ('json_object', _('JSON Object')),
+                ]
+
+    ai_model = fields.Selection(selection='_get_openai_model_list', string='AI Model')
+    fine_tuning_id = fields.Many2one('openai.fine.tuning', string='Fine-Tuning')
     temperature = fields.Float(default=1)
     max_tokens = fields.Integer(default=16)
     top_p = fields.Float(default=1)
@@ -33,19 +44,26 @@ class OpenAiCompletion(models.Model):
     stop = fields.Char()
     test_answer = fields.Text(readonly=True)
     post_process = fields.Selection(selection='_get_post_process_list')
+    response_format = fields.Selection(selection='_get_response_format_list', default='text')
+    tool_ids = fields.Many2many('openai.tool', string='Tools', copy=True)
 
-    def create_completion(self, rec_id=0, prompt='', **kwargs):
+    def create_completion(self, rec_id=0, messages=None, prompt='', **kwargs):
         openai = self.get_openai()
-        if not prompt and rec_id:
-            prompt = self.get_prompt(rec_id)
+        if not messages:
+            if not prompt:
+                prompt = self.get_prompt(rec_id)
+            messages = [{'role': 'user', 'content': prompt}]
 
         max_tokens = kwargs.get('max_tokens', self.max_tokens)
         stop = kwargs.get('stop', self.stop or '')
         if isinstance(stop, str) and ',' in stop:
             stop = stop.split(',')
-        res = openai.Completion.create(
-            model=self.ai_model,
-            prompt=prompt,
+
+        tools = [t.get_tool_dict() for t in self.tool_ids] if self.tool_ids else None
+
+        res = openai.chat.completions.create(
+            model=self.ai_model or self.fine_tuning_id.fine_tuned_model,
+            messages=messages,
             max_tokens=max_tokens,
             n=self.n,
             temperature=self.temperature,
@@ -53,20 +71,63 @@ class OpenAiCompletion(models.Model):
             frequency_penalty=self.frequency_penalty,
             presence_penalty=self.presence_penalty,
             stop=stop,
+            response_format={'type': self.response_format or 'text'},
+            tools=tools,
+            tool_choice='auto' if tools else None,
         )
         prompt_tokens = res.usage.prompt_tokens
         completion_tokens = res.usage.completion_tokens
         total_tokens = res.usage.total_tokens
 
-        if rec_id:
-            result_ids = []
-            for choice in res.choices:
-                answer = choice.text.strip()
+        result_ids = []
+        for choice in res.choices:
+            if choice.finish_reason == 'tool_calls':
+                for tool_call in choice.message.tool_calls:
+                    messages.append(choice.message)
+                    messages.append(self.run_tool_call(tool_call))
+                    return self.create_completion(rec_id, messages, prompt, **kwargs)
+            if rec_id:
+                answer = choice.message.content
                 result_id = self.create_result(rec_id, prompt, answer, prompt_tokens, completion_tokens, total_tokens)
+                if self.post_process and not self.target_field_id:
+                    result_id.exec_post_process(answer)
                 result_ids.append(result_id)
-            return result_ids
+            else:
+                return [choice.message.content for choice in res.choices]
+        return result_ids
+
+    def run_tool_call(self, tool_call):
+        tool_name = tool_call.function.name
+        res_dict = {'role': 'tool',
+                    "tool_call_id": tool_call.id,
+                    'content': '',
+                    'name': tool_name}
+        tool_id = self.tool_ids.filtered(lambda t: t.name == tool_name)
+        if not tool_id:
+            return res_dict
+        model_name = tool_id.model or self.model_id.model
+        model = self.env[model_name]
+
+        if hasattr(model, tool_name):
+            function = getattr(model, tool_name)
         else:
-            return [choice.text.strip() for choice in res.choices]
+            model = self.env['openai.tool']
+            if hasattr(model, tool_name):
+                function = getattr(model, tool_name)
+            else:
+                return res_dict
+
+        arguments = tool_call.function.arguments
+        if arguments:
+            arguments_vals = json.loads(arguments)
+            _logger.info(f'Run tool: {tool_name}({arguments_vals})')
+            res = function(**arguments_vals)
+        else:
+            res = function()
+            _logger.info(f'Run tool: {tool_name}()')
+
+        res_dict['content'] = str(res)
+        return res_dict
 
     def openai_create(self, rec_id, method=False):
         return self.create_completion(rec_id)

@@ -1,16 +1,14 @@
 # -*- coding: utf-8 -*-
-# Copyright (C) 2022 - Myrrkel (https://github.com/myrrkel).
+# Copyright (C) 2022 - Michel Perrocheau (https://github.com/myrrkel).
 # License AGPL-3.0 or later (https://www.gnu.org/licenses/agpl.html).
 
-import logging
-
-import openai
-
-from odoo import models, fields, _
-from odoo.addons.base.models.ir_model import SAFE_EVAL_BASE
+from odoo import models, fields, api, _
 from odoo.exceptions import UserError
-from odoo.tools import html2plaintext
 from odoo.tools.safe_eval import safe_eval
+from odoo.addons.base.models.ir_model import SAFE_EVAL_BASE
+from odoo.tools import html2plaintext
+import logging
+from openai import OpenAI
 
 _logger = logging.getLogger(__name__)
 
@@ -32,6 +30,7 @@ class OpenAiMixin(models.AbstractModel):
     answer_lang_id = fields.Many2one('res.lang', string='Answer Language', context={'active_test': False})
     test_prompt = fields.Text(readonly=True)
 
+    @api.model
     def get_openai(self):
         url = self.env['ir.config_parameter'].sudo().get_param('openai_api_base')
         if url:
@@ -42,7 +41,7 @@ class OpenAiMixin(models.AbstractModel):
         logging.info('OpenAI url: %s API key: %s' % (openai.api_base, openai.api_key))
         return openai
 
-    def get_prompt(self, rec_id):
+    def get_prompt(self, rec_id=0):
         context = {'html2plaintext': html2plaintext}
         lang = self.env.lang
         answer_lang_id = self.answer_lang_id or self.env['res.lang']._lang_get(lang)

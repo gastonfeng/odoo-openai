@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (C) 2022 - Myrrkel (https://github.com/myrrkel).
+# Copyright (C) 2022 - Michel Perrocheau (https://github.com/myrrkel).
 # License AGPL-3.0 or later (https://www.gnu.org/licenses/agpl.html).
 
 from odoo import models, fields, api, _
@@ -45,12 +45,24 @@ class OpenAiCompletionResult(models.Model):
             vals['origin_answer'] = self.answer
         return super(OpenAiCompletionResult, self).write(vals)
 
+    def exec_post_process(self, value):
+        if not self.completion_id.post_process:
+            return value
+        post_process_function = getattr(self, self.completion_id.post_process)
+        return post_process_function(value)
+
     def get_answer_value(self):
-        answer = self.answer
-        if self.completion_id.post_process:
-            post_process_function = getattr(self, self.completion_id.post_process)
-            answer = post_process_function(answer)
-        return answer
+        return self.exec_post_process(self.answer)
+
+    def json_to_questions(self, val):
+        values = ast.literal_eval(val)
+        questions = values.get('questions', [])
+        for question in questions:
+            create_vals = {'name': question,
+                           'model_id': self.model_id.id,
+                           'res_id': self.res_id,
+                           }
+            self.env['openai.question.answer'].create(create_vals)
 
     def list_to_many2many(self, val):
         """
